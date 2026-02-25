@@ -1,0 +1,19 @@
+name: dart_wordpiece
+description: >-
+  Pure Dart BERT-compatible WordPiece tokenizer. Encodes text into input_ids,
+  attention_mask, and token_type_ids. No Flutter dependency, zero heavy
+  dependencies. Supports file, string, and in-memory vocabulary loading.
+version: 1.0.0
+homepage: https://github.com/EgorKorshun/dart_wordpiece
+repository: https://github.com/EgorKorshun/dart_wordpiece
+issue_tracker: https://github.com/EgorKorshun/dart_wordpiece/issues
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+# Pure Dart package — no Flutter dependency required.
+# Works in Flutter apps, CLI tools, and server-side Dart.
+
+dev_dependencies:
+  test: ^1.29.0
+  lints: ^6.1.0
