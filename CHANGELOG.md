@@ -1,3 +1,15 @@
+## 1.1.0
+
+### Changed
+- `idToToken(id)` now uses an internal reverse-map built at construction time —
+  lookup is O(1) instead of O(n).
+
+### Added
+- Example 8: `tokenToId` / `idToToken` / `vocabSize` usage.
+- Example 9: `Int64List` tensor conversion for ONNX Runtime.
+
+---
+
 ## 1.0.0
 
 Initial release.

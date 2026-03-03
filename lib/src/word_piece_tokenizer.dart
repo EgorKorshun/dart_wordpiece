@@ -71,6 +71,7 @@ class WordPieceTokenizer {
     required Map<String, int> vocab,
     TokenizerConfig config = const TokenizerConfig(),
   })  : _vocab = vocab,
+        _reverseVocab = {for (final e in vocab.entries) e.value: e.key},
         _config = config,
         _normalizer = TextNormalizer(stopWords: config.stopwords) {
     _validateSpecialTokens();
@@ -117,6 +118,7 @@ class WordPieceTokenizer {
   // ---------------------------------------------------------------------------
 
   final Map<String, int> _vocab;
+  final Map<int, String> _reverseVocab;
   final TokenizerConfig _config;
   final TextNormalizer _normalizer;
 
@@ -226,13 +228,7 @@ class WordPieceTokenizer {
   /// Converts a vocabulary ID back to its token string.
   ///
   /// Returns `null` if [id] has no corresponding token.
-  /// Note: this performs a linear scan (O(n)) and is intended for debugging.
-  String? idToToken(int id) {
-    for (final MapEntry<String, int> entry in _vocab.entries) {
-      if (entry.value == id) return entry.key;
-    }
-    return null;
-  }
+  String? idToToken(int id) => _reverseVocab[id];
 
   // ---------------------------------------------------------------------------
   // Core WordPiece algorithm

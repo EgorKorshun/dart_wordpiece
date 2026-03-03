@@ -27,7 +27,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  dart_wordpiece: ^1.0.0
+  dart_wordpiece: ^1.1.0
 ```
 
 ---
@@ -139,7 +139,7 @@ final results = session.run(OrtRunOptions(), inputs);
 | `encodeAll(texts)` → `List<TokenizerOutput>`       | Batch encode                      |
 | `tokenize(text)` → `List<String>`                  | Raw token strings (no padding)    |
 | `tokenToId(token)` → `int?`                        | Look up token ID                  |
-| `idToToken(id)` → `String?`                        | Look up token string (debug)      |
+| `idToToken(id)` → `String?`                        | Look up token string — O(1)       |
 | `vocabSize`                                        | Number of tokens in vocabulary    |
 
 ### `TokenizerOutput`

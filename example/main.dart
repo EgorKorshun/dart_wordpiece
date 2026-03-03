@@ -113,4 +113,25 @@ void main() {
   // → 'dart language'
   print(normalizer.contentWords('How does Flutter handle state?'));
   // → ['does', 'flutter', 'handle', 'state']
+  print('');
+
+  // -------------------------------------------------------------------------
+  // 9. Token ↔ ID conversions (useful for debugging and post-processing).
+  // -------------------------------------------------------------------------
+  print('=== Example 8: tokenToId / idToToken ===');
+  print(tokenizer.tokenToId('[CLS]')); // → 2
+  print(tokenizer.tokenToId('flutter')); // → 4
+  print(tokenizer.idToToken(9)); // → '##kit'
+  print(tokenizer.idToToken(999)); // → null (unknown id)
+  print('vocabSize: ${tokenizer.vocabSize}');
+  print('');
+
+  // -------------------------------------------------------------------------
+  // 10. Int64List tensors for ONNX Runtime.
+  // -------------------------------------------------------------------------
+  print('=== Example 9: Int64List for ONNX ===');
+  final onnxOut = tokenizer.encode('Flutter is a UI toolkit');
+  print('inputIds (Int64List) : ${onnxOut.inputIdsInt64}');
+  print('attentionMask        : ${onnxOut.attentionMaskInt64}');
+  print('tokenTypeIds         : ${onnxOut.tokenTypeIdsInt64}');
 }
