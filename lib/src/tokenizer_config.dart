@@ -1,3 +1,4 @@
+import 'encoding_options.dart';
 import 'special_tokens.dart';
 
 /// Configuration options for [WordPieceTokenizer].
@@ -41,6 +42,8 @@ class TokenizerConfig {
     this.specialTokens = const SpecialTokens.bert(),
     this.stopwords = const <String>{},
     this.normalizeText = true,
+    this.paddingStrategy = PaddingStrategy.fixed,
+    this.truncationSide = TruncationSide.right,
   }) : assert(maxLength >= 2, 'maxLength must be at least 2 (CLS + SEP)');
 
   /// Maximum number of token IDs in the encoded output, including special
@@ -79,10 +82,24 @@ class TokenizerConfig {
   /// application performs its own pre-processing.
   final bool normalizeText;
 
+  /// How sequences are padded. Applies to [WordPieceTokenizer.encodeAll].
+  ///
+  /// [PaddingStrategy.fixed] (default) pads every sequence to [maxLength].
+  /// [PaddingStrategy.longest] pads to the longest sequence in the batch.
+  final PaddingStrategy paddingStrategy;
+
+  /// Which side of a sequence is truncated when it exceeds [maxLength].
+  ///
+  /// [TruncationSide.right] (default) drops tokens from the end.
+  /// [TruncationSide.left] drops tokens from the start.
+  final TruncationSide truncationSide;
+
   @override
   String toString() => 'TokenizerConfig('
       'maxLength: $maxLength, '
       'normalizeText: $normalizeText, '
+      'paddingStrategy: $paddingStrategy, '
+      'truncationSide: $truncationSide, '
       'stopwords: ${stopwords.length} words, '
       'specialTokens: $specialTokens'
       ')';

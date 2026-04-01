@@ -12,7 +12,10 @@ ONNX models — `input_ids`, `attention_mask`, and `token_type_ids` — with
 
 - ✅ **WordPiece algorithm** — greedy longest-match-first subword encoding
 - ✅ **Single & pair encoding** — `encode()` and `encodePair()` for QA / NLI tasks
-- ✅ **Batch encoding** — `encodeAll(List<String>)`
+- ✅ **Batch encoding** — `encodeAll()` with `PaddingStrategy.longest` support
+- ✅ **Offset mapping** — character spans per token for NER and span extraction
+- ✅ **Truncation control** — `TruncationSide.left` or `right`
+- ✅ **Async variants** — `encodeAsync` / `encodeAllAsync` for Flutter isolates
 - ✅ **Text normalization** — lowercase, punctuation removal, stopword filtering
 - ✅ **Three vocab loading strategies** — from `File`, from `String`, from `Map`
 - ✅ **Configurable** — max length, special tokens, stopwords, normalization toggle
@@ -27,7 +30,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  dart_wordpiece: ^1.1.0
+  dart_wordpiece: ^1.2.0
 ```
 
 ---
@@ -125,44 +128,141 @@ final results = session.run(OrtRunOptions(), inputs);
 
 ---
 
+## New in v1.2.0
+
+### Offset mapping
+
+`TokenizerOutput.offsetMapping` returns a `List<(int, int)>` of `(start, end)` character spans in the normalized text for each token position. Special tokens (`[CLS]`, `[SEP]`, `[PAD]`) get the sentinel `(0, 0)`.
+
+Useful for **NER**, **QA span extraction**, and **text highlighting** in Flutter:
+
+```dart
+final output = tokenizer.encode('playing dart');
+
+// Tokens:  [CLS]  play  ##ing  dart  [SEP]  [PAD]…
+// Offsets: (0,0) (0,4) (4,7) (8,12) (0,0) (0,0)…
+print(output.offsetMapping);
+// → [(0,0), (0,4), (4,7), (8,12), (0,0), ...]
+
+// Example: highlight predicted span in original text
+final spanStart = output.offsetMapping![tokenStart].$1;
+final spanEnd   = output.offsetMapping![tokenEnd].$2;
+final highlight = normalizedText.substring(spanStart, spanEnd);
+```
+
+### Special tokens mask
+
+`TokenizerOutput.specialTokensMask` is `1` for `[CLS]`/`[SEP]`/`[PAD]` and `0` for real content tokens. Useful for masked language model post-processing:
+
+```dart
+print(output.specialTokensMask);
+// encode('flutter is fast')  →  [1, 0, 0, 0, 1, 1, 1, …]
+//                                CLS  ↑         SEP PAD
+```
+
+### Overflowing tokens
+
+`TokenizerOutput.overflowingTokens` lists tokens that were removed by truncation, in order. Foundation for sliding-window approaches over long documents:
+
+```dart
+final config = TokenizerConfig(maxLength: 8);
+final output = tokenizer.encode(veryLongText);
+if (output.overflowingTokens!.isNotEmpty) {
+  print('Truncated: ${output.overflowingTokens}');
+}
+```
+
+### Padding strategy
+
+`PaddingStrategy.longest` pads the batch to the length of its longest sequence instead of `maxLength`. Saves compute when sequences vary in length:
+
+```dart
+final tokenizer = WordPieceTokenizer(
+  vocab: vocab,
+  config: TokenizerConfig(
+    maxLength: 512,
+    paddingStrategy: PaddingStrategy.longest,
+  ),
+);
+
+final outputs = tokenizer.encodeAll(shortTexts);
+// outputs[i].length == longest sequence in batch (not 512)
+```
+
+### Truncation side
+
+`TruncationSide.left` keeps the **last** N tokens instead of the first. Useful for models that attend to document endings:
+
+```dart
+final tokenizer = WordPieceTokenizer(
+  vocab: vocab,
+  config: TokenizerConfig(
+    maxLength: 64,
+    truncationSide: TruncationSide.left,
+  ),
+);
+```
+
+### Async variants
+
+`encodeAsync`, `encodePairAsync`, and `encodeAllAsync` integrate with Flutter's `compute()` and `Isolate.run()`:
+
+```dart
+// Returns a Future — safe to await in async Flutter code.
+final output = await tokenizer.encodeAsync(text);
+
+// encodeAllAsync offloads to a separate isolate for CPU-intensive batches.
+final outputs = await tokenizer.encodeAllAsync(largeTextList);
+```
+
+---
+
 ## API reference
 
 ### `WordPieceTokenizer`
 
-| Member                                             | Description                       |
-|----------------------------------------------------|-----------------------------------|
-| `WordPieceTokenizer({vocab, config})`              | Main constructor                  |
-| `WordPieceTokenizer.fromFile(file, {config})`      | Async factory from `dart:io` File |
-| `WordPieceTokenizer.fromString(content, {config})` | Sync factory from String          |
-| `encode(text)` → `TokenizerOutput`                 | Encode single sequence            |
-| `encodePair(textA, textB)` → `TokenizerOutput`     | Encode sentence pair              |
-| `encodeAll(texts)` → `List<TokenizerOutput>`       | Batch encode                      |
-| `tokenize(text)` → `List<String>`                  | Raw token strings (no padding)    |
-| `tokenToId(token)` → `int?`                        | Look up token ID                  |
-| `idToToken(id)` → `String?`                        | Look up token string — O(1)       |
-| `vocabSize`                                        | Number of tokens in vocabulary    |
+| Member                                                      | Description                           |
+|-------------------------------------------------------------|---------------------------------------|
+| `WordPieceTokenizer({vocab, config})`                       | Main constructor                      |
+| `WordPieceTokenizer.fromFile(file, {config})`               | Async factory from `dart:io` File     |
+| `WordPieceTokenizer.fromString(content, {config})`          | Sync factory from String              |
+| `encode(text)` → `TokenizerOutput`                          | Encode single sequence                |
+| `encodePair(textA, textB)` → `TokenizerOutput`              | Encode sentence pair                  |
+| `encodeAll(texts)` → `List<TokenizerOutput>`                | Batch encode                          |
+| `encodeAsync(text)` → `Future<TokenizerOutput>`             | Async encode                          |
+| `encodePairAsync(textA, textB)` → `Future<TokenizerOutput>` | Async pair encode                     |
+| `encodeAllAsync(texts)` → `Future<List<TokenizerOutput>>`   | Async batch encode (separate isolate) |
+| `tokenize(text)` → `List<String>`                           | Raw token strings (no padding)        |
+| `tokenToId(token)` → `int?`                                 | Look up token ID                      |
+| `idToToken(id)` → `String?`                                 | Look up token string — O(1)           |
+| `vocabSize`                                                 | Number of tokens in vocabulary        |
 
 ### `TokenizerOutput`
 
-| Member               | Type        | Description                  |
-|----------------------|-------------|------------------------------|
-| `inputIds`           | `List<int>` | Vocabulary IDs               |
-| `attentionMask`      | `List<int>` | 1 = real token, 0 = padding  |
-| `tokenTypeIds`       | `List<int>` | 0 = segment A, 1 = segment B |
-| `length`             | `int`       | Always equals `maxLength`    |
-| `realLength`         | `int`       | Non-padding positions        |
-| `inputIdsInt64`      | `Int64List` | Ready for ONNX tensor        |
-| `attentionMaskInt64` | `Int64List` | Ready for ONNX tensor        |
-| `tokenTypeIdsInt64`  | `Int64List` | Ready for ONNX tensor        |
+| Member               | Type               | Description                             |
+|----------------------|--------------------|-----------------------------------------|
+| `inputIds`           | `List<int>`        | Vocabulary IDs                          |
+| `attentionMask`      | `List<int>`        | 1 = real token, 0 = padding             |
+| `tokenTypeIds`       | `List<int>`        | 0 = segment A, 1 = segment B            |
+| `offsetMapping`      | `List<(int,int)>?` | Char spans per token in normalized text |
+| `specialTokensMask`  | `List<int>?`       | 1 = [CLS]/[SEP]/[PAD], 0 = content      |
+| `overflowingTokens`  | `List<String>?`    | Tokens removed by truncation            |
+| `length`             | `int`              | Total token slots                       |
+| `realLength`         | `int`              | Non-padding positions                   |
+| `inputIdsInt64`      | `Int64List`        | Ready for ONNX tensor                   |
+| `attentionMaskInt64` | `Int64List`        | Ready for ONNX tensor                   |
+| `tokenTypeIdsInt64`  | `Int64List`        | Ready for ONNX tensor                   |
 
 ### `TokenizerConfig`
 
-| Parameter       | Default                | Description                                      |
-|-----------------|------------------------|--------------------------------------------------|
-| `maxLength`     | `64`                   | Output sequence length (includes special tokens) |
-| `specialTokens` | `SpecialTokens.bert()` | `[CLS]`, `[SEP]`, `[PAD]`, `[UNK]`, `##`         |
-| `stopwords`     | `{}`                   | Words removed before tokenization                |
-| `normalizeText` | `true`                 | Lowercase + remove punctuation                   |
+| Parameter         | Default                 | Description                                                    |
+|-------------------|-------------------------|----------------------------------------------------------------|
+| `maxLength`       | `64`                    | Output sequence length (includes special tokens)               |
+| `specialTokens`   | `SpecialTokens.bert()`  | `[CLS]`, `[SEP]`, `[PAD]`, `[UNK]`, `##`                       |
+| `stopwords`       | `{}`                    | Words removed before tokenization                              |
+| `normalizeText`   | `true`                  | Lowercase + remove punctuation                                 |
+| `paddingStrategy` | `PaddingStrategy.fixed` | `fixed` = pad to `maxLength`; `longest` = pad to batch longest |
+| `truncationSide`  | `TruncationSide.right`  | `right` = drop from end; `left` = drop from start              |
 
 ### `VocabLoader`
 
@@ -226,10 +326,10 @@ final vocab = VocabLoader.fromString(raw);
 final tokenizer = WordPieceTokenizer(vocab: vocab);
 
 // Works with English, Chinese, Russian, Arabic, etc.
-tokenizer.encode('Hello World');  // English
-tokenizer.encode('你好世界');      // Chinese
-tokenizer.encode('Привет мир');  // Russian
-tokenizer.encode('مرحبا بالعالم');  // Arabic
+tokenizer.encode('Hello World');        // English
+tokenizer.encode('你好世界');           // Chinese
+tokenizer.encode('Привет мир');        // Russian
+tokenizer.encode('مرحبا بالعالم');     // Arabic
 ```
 
 The `TextNormalizer` uses Unicode-aware regex (`\p{L}`, `\p{N}`), so punctuation removal and letter detection work correctly for all writing systems.

@@ -465,4 +465,229 @@ void main() {
       expect(tokens, contains('is'));
     });
   });
+
+  // =========================================================================
+  // v1.2.0 — offsetMapping
+  // =========================================================================
+  group('TokenizerOutput.offsetMapping', () {
+    test('CLS and SEP have sentinel (0,0)', () {
+      final t = _tokenizer(maxLength: 8);
+      final out = t.encode('flutter');
+      // CLS at index 0, SEP at index 2
+      expect(out.offsetMapping![0], (0, 0));
+      expect(out.offsetMapping![2], (0, 0));
+    });
+
+    test('PAD positions have sentinel (0,0)', () {
+      final t = _tokenizer(maxLength: 8);
+      final out = t.encode('flutter'); // realLength=3, rest is padding
+      for (int i = 3; i < 8; i++) {
+        expect(out.offsetMapping![i], (0, 0),
+            reason: 'index $i should be a PAD sentinel');
+      }
+    });
+
+    test('whole-word token gets span covering the full word', () {
+      final t = _tokenizer(maxLength: 8);
+      // "flutter" (7 chars) → single token at offset (0,7)
+      final out = t.encode('flutter');
+      expect(out.offsetMapping![1], (0, 7));
+    });
+
+    test('subword pieces get correct spans within word', () {
+      final t = _tokenizer(maxLength: 8);
+      // "playing" → play(0,4) + ##ing(4,7)
+      // Vocab has: play=9, ##ing=8 — "playing" is not in vocab so it splits
+      final out = t.encode('playing');
+      expect(out.offsetMapping![1], (0, 4)); // play
+      expect(out.offsetMapping![2], (4, 7)); // ##ing
+    });
+
+    test('multi-word sequence: second word starts after space', () {
+      final t = _tokenizer(maxLength: 8);
+      // "flutter fast" → flutter at (0,7), fast at (8,12)
+      final out = t.encode('flutter fast');
+      expect(out.offsetMapping![1], (0, 7)); // flutter
+      expect(out.offsetMapping![2], (8, 12)); // fast
+    });
+
+    test('offsetMapping length equals inputIds length', () {
+      final t = _tokenizer(maxLength: 10);
+      final out = t.encode('flutter is fast');
+      expect(out.offsetMapping!.length, out.inputIds.length);
+    });
+
+    test('encodePair: segA and segB use independent spans', () {
+      final t = _tokenizer(maxLength: 10);
+      // A: "flutter" (7 chars) → (0,7)
+      // B: "fast" (4 chars) → (0,4)
+      final out = t.encodePair('flutter', 'fast');
+      expect(out.offsetMapping![1], (0, 7)); // flutter in seg A
+      expect(out.offsetMapping![3], (0, 4)); // fast in seg B (spans reset)
+    });
+  });
+
+  // =========================================================================
+  // v1.2.0 — specialTokensMask
+  // =========================================================================
+  group('TokenizerOutput.specialTokensMask', () {
+    test('CLS, SEP, PAD are 1; content tokens are 0', () {
+      final t = _tokenizer(maxLength: 8);
+      final out = t.encode('flutter'); // [CLS flutter SEP PAD PAD PAD PAD PAD]
+      expect(out.specialTokensMask, [1, 0, 1, 1, 1, 1, 1, 1]);
+    });
+
+    test('length matches inputIds length', () {
+      final t = _tokenizer(maxLength: 12);
+      final out = t.encode('flutter is fast');
+      expect(out.specialTokensMask!.length, out.inputIds.length);
+    });
+
+    test('pair encoding: both SEP tokens are masked as 1', () {
+      final t = _tokenizer(maxLength: 8);
+      // [CLS flutter SEP fast SEP PAD PAD PAD]
+      //   1    0      1    0    1   1   1   1
+      final out = t.encodePair('flutter', 'fast');
+      expect(out.specialTokensMask, [1, 0, 1, 0, 1, 1, 1, 1]);
+    });
+  });
+
+  // =========================================================================
+  // v1.2.0 — overflowingTokens
+  // =========================================================================
+  group('TokenizerOutput.overflowingTokens', () {
+    test('empty list when sequence fits within maxLength', () {
+      final t = _tokenizer(maxLength: 16);
+      final out = t.encode('flutter is fast');
+      expect(out.overflowingTokens, isEmpty);
+    });
+
+    test('right truncation captures dropped tail tokens', () {
+      // "flutter is fast dart" = 4 tokens; maxLength=5 → available=3
+      // Kept: flutter, is, fast  — dropped: dart
+      final t = _tokenizer(maxLength: 5);
+      final out = t.encode('flutter is fast dart');
+      expect(out.overflowingTokens, ['dart']);
+    });
+
+    test('left truncation captures dropped head tokens', () {
+      final t = WordPieceTokenizer(
+        vocab: _buildVocab(),
+        config: const TokenizerConfig(
+          maxLength: 5,
+          truncationSide: TruncationSide.left,
+        ),
+      );
+      // available=3; last 3 tokens of [flutter, is, fast, dart] = [is, fast, dart]
+      // dropped from head: [flutter]
+      final out = t.encode('flutter is fast dart');
+      expect(out.overflowingTokens, ['flutter']);
+    });
+  });
+
+  // =========================================================================
+  // v1.2.0 — PaddingStrategy.longest
+  // =========================================================================
+  group('PaddingStrategy.longest', () {
+    test('batch pads to longest sequence length, not maxLength', () {
+      final t = WordPieceTokenizer(
+        vocab: _buildVocab(),
+        config: const TokenizerConfig(
+          maxLength: 16,
+          paddingStrategy: PaddingStrategy.longest,
+        ),
+      );
+      // 'flutter' → 1 token → realLength 3 (CLS + token + SEP)
+      // 'fast'    → 1 token → realLength 3
+      final outputs = t.encodeAll(['flutter', 'fast']);
+      expect(outputs[0].length, 3);
+      expect(outputs[1].length, 3);
+    });
+
+    test('when sequences differ, all pad to longest', () {
+      final t = WordPieceTokenizer(
+        vocab: _buildVocab(),
+        config: const TokenizerConfig(
+          maxLength: 16,
+          paddingStrategy: PaddingStrategy.longest,
+        ),
+      );
+      // 'flutter' → real 3; 'flutter is fast' → real 5
+      final outputs = t.encodeAll(['flutter', 'flutter is fast']);
+      expect(outputs[0].length, 5);
+      expect(outputs[1].length, 5);
+    });
+
+    test('encode() always uses fixed padding regardless of config', () {
+      final t = WordPieceTokenizer(
+        vocab: _buildVocab(),
+        config: const TokenizerConfig(
+          maxLength: 16,
+          paddingStrategy: PaddingStrategy.longest,
+        ),
+      );
+      final out = t.encode('flutter');
+      // Single encode always pads to maxLength
+      expect(out.length, 16);
+    });
+  });
+
+  // =========================================================================
+  // v1.2.0 — TruncationSide.left
+  // =========================================================================
+  group('TruncationSide.left', () {
+    test('left truncation keeps the last N tokens of a long segment', () {
+      final t = WordPieceTokenizer(
+        vocab: _buildVocab(),
+        config: const TokenizerConfig(
+          maxLength: 5,
+          truncationSide: TruncationSide.left,
+        ),
+      );
+      // available=3; [flutter, is, fast, dart] → keep last 3: [is, fast, dart]
+      final out = t.encode('flutter is fast dart');
+      expect(out.inputIds[1], 5); // 'is'
+      expect(out.inputIds[2], 6); // 'fast'
+      expect(out.inputIds[3], 7); // 'dart'
+    });
+
+    test('right truncation (default) keeps the first N tokens', () {
+      final t = _tokenizer(maxLength: 5);
+      // available=3; [flutter, is, fast, dart] → keep first 3: [flutter, is, fast]
+      final out = t.encode('flutter is fast dart');
+      expect(out.inputIds[1], 4); // 'flutter'
+      expect(out.inputIds[2], 5); // 'is'
+      expect(out.inputIds[3], 6); // 'fast'
+    });
+  });
+
+  // =========================================================================
+  // v1.2.0 — async variants
+  // =========================================================================
+  group('async variants', () {
+    test('encodeAsync returns same result as encode', () async {
+      final t = _tokenizer(maxLength: 8);
+      final sync = t.encode('flutter is fast');
+      final async_ = await t.encodeAsync('flutter is fast');
+      expect(async_, sync);
+    });
+
+    test('encodePairAsync returns same result as encodePair', () async {
+      final t = _tokenizer(maxLength: 10);
+      final sync = t.encodePair('flutter', 'fast');
+      final async_ = await t.encodePairAsync('flutter', 'fast');
+      expect(async_, sync);
+    });
+
+    test('encodeAllAsync returns same result as encodeAll', () async {
+      final t = _tokenizer(maxLength: 8);
+      final texts = ['flutter', 'dart is fast'];
+      final sync = t.encodeAll(texts);
+      final async_ = await t.encodeAllAsync(texts);
+      expect(async_.length, sync.length);
+      for (int i = 0; i < sync.length; i++) {
+        expect(async_[i], sync[i]);
+      }
+    });
+  });
 }

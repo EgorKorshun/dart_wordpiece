@@ -17,6 +17,7 @@
 /// ```
 library;
 
+export 'src/encoding_options.dart';
 export 'src/special_tokens.dart';
 export 'src/text_normalizer.dart';
 export 'src/tokenizer_config.dart';

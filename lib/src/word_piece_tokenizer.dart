@@ -1,10 +1,31 @@
 import 'dart:io';
+import 'dart:isolate';
 
+import 'encoding_options.dart';
 import 'special_tokens.dart';
 import 'text_normalizer.dart';
 import 'tokenizer_config.dart';
 import 'tokenizer_output.dart';
 import 'vocab_loader.dart';
+
+// ---------------------------------------------------------------------------
+// Internal record types
+// ---------------------------------------------------------------------------
+
+/// Result of the WordPiece algorithm: token strings paired with their
+/// character-span offsets in the normalized input string.
+typedef _WordPieceResult = ({
+  List<String> tokens,
+  List<(int, int)> offsets,
+});
+
+/// Full tokenization result including vocabulary IDs, offsets, and token
+/// strings (needed for overflowing-tokens tracking).
+typedef _TokenizeResult = ({
+  List<int> ids,
+  List<(int, int)> offsets,
+  List<String> tokens,
+});
 
 /// A BERT-compatible WordPiece tokenizer implemented in pure Dart.
 ///
@@ -40,6 +61,7 @@ import 'vocab_loader.dart';
 /// print(output.inputIds);      // [101, 2054, 2003, 14246, 2102, 1029, 102, 0, …]
 /// print(output.attentionMask); // [1, 1, 1, 1, 1, 1, 1, 0, …]
 /// print(output.realLength);    // 7
+/// print(output.offsetMapping); // [(0,0),(0,4),(5,7),(8,15),(0,0),…]
 ///
 /// // 4. Encode a sentence pair (BERT QA / NLI).
 /// final pair = tokenizer.encodePair('Flutter is a UI toolkit.', 'What is Flutter?');
@@ -152,10 +174,15 @@ class WordPieceTokenizer {
   /// final out = tokenizer.encode('Flutter is fast');
   /// print(out.inputIds);      // [101, …content…, 102, 0, 0, …]
   /// print(out.realLength);    // number of non-pad tokens
+  /// print(out.offsetMapping); // [(0,0), (0,7), …, (0,0), (0,0), …]
   /// ```
   TokenizerOutput encode(String text) {
-    final List<int> contentIds = _tokenizeToIds(text);
-    return _buildOutput(segmentA: contentIds);
+    final _TokenizeResult r = _tokenizeToResult(text);
+    return _buildOutput(
+      segmentA: r.ids,
+      offsetsA: r.offsets,
+      tokensA: r.tokens,
+    );
   }
 
   /// Encodes a sentence pair [textA] and [textB] into a single [TokenizerOutput].
@@ -182,22 +209,95 @@ class WordPieceTokenizer {
   /// );
   /// ```
   TokenizerOutput encodePair(String textA, String textB) {
-    final List<int> idsA = _tokenizeToIds(textA);
-    final List<int> idsB = _tokenizeToIds(textB);
-    return _buildOutput(segmentA: idsA, segmentB: idsB);
+    final _TokenizeResult rA = _tokenizeToResult(textA);
+    final _TokenizeResult rB = _tokenizeToResult(textB);
+    return _buildOutput(
+      segmentA: rA.ids,
+      offsetsA: rA.offsets,
+      tokensA: rA.tokens,
+      segmentB: rB.ids,
+      offsetsB: rB.offsets,
+      tokensB: rB.tokens,
+    );
   }
 
   /// Encodes every string in [texts] and returns a list of [TokenizerOutput].
   ///
-  /// Each output has the same length ([TokenizerConfig.maxLength]), making it
-  /// straightforward to stack into a batch tensor.
+  /// With [PaddingStrategy.fixed] (default) every output has the same length
+  /// ([TokenizerConfig.maxLength]), making it straightforward to stack into a
+  /// batch tensor.
+  ///
+  /// With [PaddingStrategy.longest] every output is padded to the length of
+  /// the longest sequence in [texts], which can save compute and memory.
   ///
   /// Example:
   /// ```dart
   /// final outputs = tokenizer.encodeAll(['hello', 'world']);
   /// ```
-  List<TokenizerOutput> encodeAll(List<String> texts) =>
-      texts.map(encode).toList();
+  List<TokenizerOutput> encodeAll(List<String> texts) {
+    if (_config.paddingStrategy == PaddingStrategy.fixed) {
+      return texts.map(encode).toList();
+    }
+
+    // PaddingStrategy.longest — two-pass.
+    final List<_TokenizeResult> results =
+        texts.map(_tokenizeToResult).toList();
+
+    // Compute the real length each sequence would have after specials +
+    // truncation (before padding).
+    const int reserved = 2; // CLS + SEP
+    int longestReal = 0;
+    for (final _TokenizeResult r in results) {
+      final int real =
+          r.ids.length.clamp(0, _maxLength - reserved) + reserved;
+      if (real > longestReal) longestReal = real;
+    }
+
+    final int padTarget = longestReal.clamp(2, _maxLength);
+    return results
+        .map(
+          (_TokenizeResult r) => _buildOutput(
+            segmentA: r.ids,
+            offsetsA: r.offsets,
+            tokensA: r.tokens,
+            overridePadTarget: padTarget,
+          ),
+        )
+        .toList();
+  }
+
+  /// Async variant of [encode].
+  ///
+  /// Uses [Future.value] — executes synchronously on the current isolate but
+  /// returns a [Future] for `await` compatibility. For true CPU offloading use:
+  /// ```dart
+  /// final output = await Isolate.run(() => tokenizer.encode(text));
+  /// ```
+  Future<TokenizerOutput> encodeAsync(String text) =>
+      Future.value(encode(text));
+
+  /// Async variant of [encodePair].
+  ///
+  /// Uses [Future.value] — see [encodeAsync] for notes on isolate offloading.
+  Future<TokenizerOutput> encodePairAsync(String textA, String textB) =>
+      Future.value(encodePair(textA, textB));
+
+  /// Async variant of [encodeAll].
+  ///
+  /// Offloads work to a separate [Isolate] because batch tokenization can be
+  /// CPU-intensive. The vocabulary map is copied into the isolate by the Dart
+  /// message-passing system.
+  ///
+  /// For very large vocabularies, constructing the tokenizer inside the
+  /// isolate avoids the copy overhead:
+  /// ```dart
+  /// final outputs = await Isolate.run(() {
+  ///   final t = WordPieceTokenizer(vocab: myVocab, config: myConfig);
+  ///   return t.encodeAll(texts);
+  /// });
+  /// ```
+  Future<List<TokenizerOutput>> encodeAllAsync(List<String> texts) =>
+      Isolate.run(() => encodeAll(texts));
 
   /// Runs the WordPiece algorithm and returns token strings (not IDs).
   ///
@@ -214,10 +314,8 @@ class WordPieceTokenizer {
     final String input =
         _config.normalizeText ? _normalizer.normalize(text) : text.toLowerCase();
 
-    final List<String> tokenStrings = <String>[_tokens.cls];
-    _wordpieceEncode(input, tokenStrings);
-    tokenStrings.add(_tokens.sep);
-    return tokenStrings;
+    final _WordPieceResult result = _wordpieceEncode(input);
+    return <String>[_tokens.cls, ...result.tokens, _tokens.sep];
   }
 
   /// Converts a token string back to its vocabulary ID.
@@ -234,25 +332,39 @@ class WordPieceTokenizer {
   // Core WordPiece algorithm
   // ---------------------------------------------------------------------------
 
-  /// Applies the WordPiece algorithm to [text] and appends token strings to
-  /// [out].
+  /// Applies the WordPiece algorithm to [text] and returns tokens with their
+  /// character-span offsets within [text].
+  ///
+  /// [text] must already be normalized (whitespace-collapsed) before calling
+  /// this method. The character cursor advances one position per space between
+  /// words, which matches the output of [TextNormalizer.normalize].
   ///
   /// The algorithm processes each whitespace-delimited word independently:
   ///
   /// 1. Try to find the longest prefix of [remaining] in the vocabulary.
   ///    - For the first piece of a word: look up [piece] directly.
   ///    - For continuation pieces: look up `##[piece]`.
-  /// 2. If a match is found, emit the token and repeat on the suffix.
-  /// 3. If no match is found (not even a single character), emit [SpecialTokens.unk]
-  ///    and skip the rest of the word.
-  void _wordpieceEncode(String text, List<String> out) {
+  /// 2. If a match is found, emit the token with its char span and repeat on
+  ///    the suffix.
+  /// 3. If no match is found (not even a single character), emit
+  ///    [SpecialTokens.unk] with a span covering the full unmatched word.
+  _WordPieceResult _wordpieceEncode(String text) {
+    final List<String> tokens = <String>[];
+    final List<(int, int)> offsets = <(int, int)>[];
+
     final List<String> words = text.split(RegExp(r'\s+'));
+    int charCursor = 0;
 
     for (final String word in words) {
-      if (word.isEmpty) continue;
+      if (word.isEmpty) {
+        charCursor++;
+        continue;
+      }
 
+      final int wordStart = charCursor;
       String remaining = word;
       bool isFirstPiece = true;
+      int consumed = 0;
 
       while (remaining.isNotEmpty) {
         bool matched = false;
@@ -264,8 +376,10 @@ class WordPieceTokenizer {
               isFirstPiece ? candidate : '${_tokens.subwordPrefix}$candidate';
 
           if (_vocab.containsKey(key)) {
-            out.add(key);
+            tokens.add(key);
+            offsets.add((wordStart + consumed, wordStart + consumed + end));
             remaining = remaining.substring(end);
+            consumed += end;
             isFirstPiece = false;
             matched = true;
             break;
@@ -274,56 +388,101 @@ class WordPieceTokenizer {
 
         if (!matched) {
           // No vocabulary match for any prefix → replace whole word with UNK.
-          out.add(_tokens.unk);
+          tokens.add(_tokens.unk);
+          offsets.add((wordStart, wordStart + word.length));
           break;
         }
       }
+
+      charCursor += word.length + 1; // word chars + one inter-word space
     }
+
+    return (tokens: tokens, offsets: offsets);
   }
 
   // ---------------------------------------------------------------------------
   // Encoding helpers
   // ---------------------------------------------------------------------------
 
-  /// Normalizes [text] and returns a list of vocabulary IDs (without special
-  /// tokens or padding).
-  List<int> _tokenizeToIds(String text) {
+  /// Normalizes [text], runs WordPiece, and returns IDs, offsets, and token
+  /// strings in one shot (avoids double-encoding).
+  _TokenizeResult _tokenizeToResult(String text) {
     final String input =
         _config.normalizeText ? _normalizer.normalize(text) : text.toLowerCase();
-    final List<String> pieces = <String>[];
-    _wordpieceEncode(input, pieces);
-
+    final _WordPieceResult wp = _wordpieceEncode(input);
     final int unkId = _vocab[_tokens.unk]!;
-    return pieces.map((String t) => _vocab[t] ?? unkId).toList();
+    return (
+      ids: wp.tokens.map((String t) => _vocab[t] ?? unkId).toList(),
+      offsets: wp.offsets,
+      tokens: wp.tokens,
+    );
   }
 
-  /// Assembles the final [TokenizerOutput] from pre-tokenized segment IDs.
+  /// Assembles the final [TokenizerOutput] from pre-tokenized segment data.
   ///
   /// Single-segment: `[CLS] segA [SEP] [PAD]…`
   /// Two-segment:    `[CLS] segA [SEP] segB [SEP] [PAD]…`
   ///
-  /// Truncates [segmentB] first when the total exceeds [_maxLength].
+  /// Truncates [segmentB] first when the total exceeds the pad target.
+  /// Uses [TokenizerConfig.truncationSide] to decide which side to drop.
   TokenizerOutput _buildOutput({
     required List<int> segmentA,
+    required List<(int, int)> offsetsA,
+    required List<String> tokensA,
     List<int>? segmentB,
+    List<(int, int)>? offsetsB,
+    List<String>? tokensB,
+    int? overridePadTarget,
   }) {
     final int clsId = _vocab[_tokens.cls]!;
     final int sepId = _vocab[_tokens.sep]!;
     final int padId = _vocab[_tokens.pad]!;
 
+    final int padTarget = overridePadTarget ?? _maxLength;
+
     // Reserve slots: 1 CLS + 1 SEP for segment A (+ 1 SEP for segment B).
     final int reservedSlots = segmentB == null ? 2 : 3;
-    final int available = _maxLength - reservedSlots;
+    final int available = padTarget - reservedSlots;
 
     List<int> a = segmentA;
+    List<(int, int)> aOff = offsetsA;
+    List<String> aTok = tokensA;
+
     List<int> b = segmentB ?? <int>[];
+    List<(int, int)> bOff = offsetsB ?? <(int, int)>[];
+    List<String> bTok = tokensB ?? <String>[];
+
+    // Collect overflowing tokens before truncation.
+    final List<String> overflowing = <String>[];
 
     if (a.length + b.length > available) {
-      // Truncate segment B first; then segment A if still too long.
-      final int bAllowed = (available - a.length).clamp(0, b.length);
-      b = b.sublist(0, bAllowed);
-      final int aAllowed = (available - b.length).clamp(0, a.length);
-      a = a.sublist(0, aAllowed);
+      if (_config.truncationSide == TruncationSide.right) {
+        // Truncate from the end: segment B first, then segment A.
+        final int bAllowed = (available - a.length).clamp(0, b.length);
+        overflowing.addAll(bTok.sublist(bAllowed));
+        b = b.sublist(0, bAllowed);
+        bOff = bOff.sublist(0, bAllowed);
+        bTok = bTok.sublist(0, bAllowed);
+
+        final int aAllowed = (available - b.length).clamp(0, a.length);
+        overflowing.addAll(aTok.sublist(aAllowed));
+        a = a.sublist(0, aAllowed);
+        aOff = aOff.sublist(0, aAllowed);
+        aTok = aTok.sublist(0, aAllowed);
+      } else {
+        // TruncationSide.left — keep the tail of each segment.
+        final int bAllowed = (available - a.length).clamp(0, b.length);
+        overflowing.addAll(bTok.sublist(0, b.length - bAllowed));
+        b = b.sublist(b.length - bAllowed);
+        bOff = bOff.sublist(bOff.length - bAllowed);
+        bTok = bTok.sublist(bTok.length - bAllowed);
+
+        final int aAllowed = (available - b.length).clamp(0, a.length);
+        overflowing.addAll(aTok.sublist(0, a.length - aAllowed));
+        a = a.sublist(a.length - aAllowed);
+        aOff = aOff.sublist(aOff.length - aAllowed);
+        aTok = aTok.sublist(aTok.length - aAllowed);
+      }
     }
 
     // Build flat token ID list.
@@ -336,21 +495,44 @@ class WordPieceTokenizer {
       ...List<int>.filled(b.length + (segmentB != null ? 1 : 0), 1),
     ];
 
-    // Attention mask: 1 for real tokens (growable so padding can be appended).
+    // Attention mask: 1 for real tokens.
     final int realCount = ids.length;
     final List<int> mask = List<int>.filled(realCount, 1, growable: true);
 
-    // Pad all lists to maxLength.
-    while (ids.length < _maxLength) {
+    // specialTokensMask: 1 for CLS/SEP, 0 for content.
+    final List<int> specialMask = <int>[
+      1, // CLS
+      ...List<int>.filled(a.length, 0),
+      1, // SEP after A
+      ...List<int>.filled(b.length, 0),
+      if (segmentB != null) 1, // SEP after B
+    ];
+
+    // offsetMapping: (0,0) sentinels for special tokens.
+    final List<(int, int)> offsetMap = <(int, int)>[
+      (0, 0), // CLS
+      ...aOff,
+      (0, 0), // SEP after A
+      ...bOff,
+      if (segmentB != null) (0, 0), // SEP after B
+    ];
+
+    // Pad all lists to padTarget.
+    while (ids.length < padTarget) {
       ids.add(padId);
       mask.add(0);
       typeIds.add(0);
+      specialMask.add(1); // PAD is a special token
+      offsetMap.add((0, 0));
     }
 
     return TokenizerOutput(
       inputIds: ids,
       attentionMask: mask,
       tokenTypeIds: typeIds,
+      offsetMapping: offsetMap,
+      specialTokensMask: specialMask,
+      overflowingTokens: overflowing,
     );
   }
 

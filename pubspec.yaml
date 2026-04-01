@@ -2,7 +2,7 @@ name: dart_wordpiece
 description: >-
   Pure Dart BERT-compatible WordPiece tokenizer. Outputs input_ids,
   attention_mask, and token_type_ids. No Flutter or native dependencies.
-version: 1.1.0
+version: 1.2.0
 homepage: https://github.com/EgorKorshun/dart_wordpiece
 repository: https://github.com/EgorKorshun/dart_wordpiece
 issue_tracker: https://github.com/EgorKorshun/dart_wordpiece/issues
@@ -14,5 +14,5 @@ environment:
 # Works in Flutter apps, CLI tools, and server-side Dart.
 
 dev_dependencies:
-  test: ^1.29.0
+  test: ^1.31.0
   lints: ^6.1.0
